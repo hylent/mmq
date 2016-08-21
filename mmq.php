@@ -12,6 +12,10 @@ class Mmq_TubeException extends Mmq_Exception
 {
 }
 
+class Mmq_JobException extends Mmq_Exception
+{
+}
+
 class Mmq_Mysql
 {
     protected $mysqli;
@@ -20,14 +24,53 @@ class Mmq_Mysql
     {
         $this->mysqli = $mysqli;
     }
+
+    public function begin()
+    {
+    }
+
+    public function commit()
+    {
+    }
+
+    public function rollback()
+    {
+    }
+
+    public function find()
+    {
+    }
+
+    public function findForUpdate()
+    {
+    }
+
+    public function findList()
+    {
+    }
+
+    public function findIndexedList()
+    {
+    }
+
+    public function delete()
+    {
+    }
+
+    public function insert()
+    {
+    }
+
+    public function update()
+    {
+    }
 }
 
 class Mmq
 {
     const DEFAULT_SESSION_TRIES = 3;
     const DEFAULT_SESSION_TTL   = 900;
-    const DEFAULT_DEADLINE      = 1;
-    const DEFAULT_TTR           = 30;
+    const DEFAULT_TTR           = 90;
     const DEFAULT_PRIORITY      = 1024;
     const DEFAULT_TUBE          = 'default';
 
@@ -39,7 +82,6 @@ class Mmq
 
     protected $sessionTries     = self::DEFAULT_SESSION_TRIES;
     protected $sessionTtl       = self::DEFAULT_SESSION_TTL;
-    protected $deadline         = self::DEFAULT_DEADLINE;
     protected $ttr              = self::DEFAULT_TTR;
     protected $priority         = self::DEFAULT_PRIORITY;
     protected $tube             = self::DEFAULT_TUBE;
@@ -59,13 +101,10 @@ class Mmq
         if (isset($defaults['sessionTtl']) && is_int($defaults['sessionTtl']) && $defaults['sessionTtl'] > 0) {
             $this->sessionTtl = $defaults['sessionTtl'];
         }
-        if (isset($defaults['deadline']) && is_int($defaults['deadline']) && $defaults['deadline'] > 0) {
-            $this->deadline = $defaults['deadline'];
-        }
         if (isset($defaults['ttr']) && is_int($defaults['ttr']) && $defaults['ttr'] > 0) {
             $this->ttr = $defaults['ttr'];
         }
-        if (isset($defaults['priority']) && is_int($defaults['priority']) && $defaults['priority'] > 0) {
+        if (isset($defaults['priority']) && is_int($defaults['priority']) && $defaults['priority'] >= 0) {
             $this->priority = $defaults['priority'];
         }
         if (isset($defaults['tube']) && is_string($defaults['tube']) && strlen($defaults['tube']) > 0) {
@@ -117,6 +156,20 @@ class Mmq
         $this->sessionData  = $sessionData;
     }
 
+    protected function filterTtr($ttr)
+    {
+        $ttr = (int) $ttr;
+
+        return $ttr < 1 ? self::DEFAULT_TTR : $ttr;
+    }
+
+    protected function filterPriority($pri)
+    {
+        $pri = (int) $pri;
+
+        return $pri < 0 ? self::DEFAULT_PRIORITY : $pri;
+    }
+
     protected function filterTube($tube)
     {
         $tube = (string) $tube;
@@ -129,6 +182,16 @@ class Mmq
         }
 
         return $tube;
+    }
+
+    protected function filterData($data)
+    {
+        $data = (string) $data;
+        if (mb_strlen($data, 'utf-8') > 2000) {
+            throw new Mmq_JobException('Job data too large');
+        }
+
+        return $data;
     }
 
     public function listTubes()
@@ -159,19 +222,12 @@ class Mmq
         return $this->sessionData['tube'];
     }
 
-    public function put($data, $ttr = 0, $pri = 0, $delay = 0)
+    public function put($data, $ttr = 0, $pri = -1, $delay = 0)
     {
-        $data = (string) $data;
+        $data = $this->filterData($data);
 
-        $ttr = (int) $ttr;
-        if ($ttr < 1) {
-            $ttr = $this->ttr;
-        }
-
-        $pri = (int) $pri;
-        if ($pri < 1) {
-            $pri = $this->pri;
-        }
+        $ttr = $this->filterTtr($ttr);
+        $pri = $this->filterPriority($pri);
 
         $delay  = max(0, (int) $delay);
 
@@ -188,6 +244,58 @@ class Mmq
             'ts_created'    => $now,
             'ts_updated'    => $now,
         ));
+    }
+
+    public function kickJobs($bound)
+    {
+        return $this->mysql->update('job', array(
+            'session'       => 0,
+            'state'         => self::STATE_READY,
+            'ts_updated'    => $now,
+        ), array(
+            'state'         => self::STATE_BURIED,
+            'tube'          => $this->sessionData['tube'],
+        ), array(
+            'pri'           => 'asc',
+            'ts_available'  => 'asc',
+            'id'            => 'asc',
+        ), $bound);
+    }
+
+    public function kick($id)
+    {
+        $result = false;
+        $this->mysql->begin();
+
+        try {
+            $job = $this->mysql->findForUpdate('job', array(
+                'id'    => $id,
+            ));
+
+            if ($job && $job['state'] != self::STATE_DELETED) {
+                $result = true;
+
+                $now = time();
+
+                if ($job['state'] == self::STATE_BURIED) {
+                    throw new Mmq_JobException('Cannot kick a job not in buried state');
+                }
+
+                $this->mysql->update('job', array(
+                    'session'       => 0,
+                    'state'         => self::STATE_READY,
+                    'ts_updated'    => $now,
+                ), array(
+                    'id'            => $id,
+                ));
+            }
+
+        } catch (Exception $ex) {
+            $this->mysql->rollback();
+            throw $ex;
+        }
+
+        return $result;
     }
 
     public function watchTube($tube)
@@ -232,90 +340,228 @@ class Mmq
         return $this->sessionData['watchedTubes'];
     }
 
-    /**
-     * Consumer. Reserve a job from the queue.
-     *
-     * @param   long    timeout
-     *
-     * @return  null    when timed out
-     * @return  array
-     *          .id     long    job id
-     *          .data   string  job data
-     *          .tube   string  tube
-     *
-     * @throws  ERR_DEADLINE_SOON
-     */
     public function reserve($timeout = 0)
     {
+        $expire = 1 + time() + max(0, (int) $timeout);
+
+        $job = null;
+        $this->mysql->begin();
+
+        try {
+            $sessionData = $this->mysql->findForUpdate('session', array(
+                'session'   => $this->session,
+            ));
+
+            for ($i = 0; time() < $expire; $i++) {
+                if ($i > 0) {
+                    sleep(pow(2, $i - 1));
+                }
+
+                $now = time();
+
+                $this->mysql->update('job', array(
+                    'session'           => $this->session,
+                    'ts_available$expr' => 'ttr + '.$now,
+                    'ts_updated'        => $now,
+                ), array(
+                    'state'             => self::STATE_READY,
+                    'tube$in'           => $this->sessionData['watchedTubes'],
+                    'ts_available$lt'   => $now,
+                ), array(
+                    'pri'           => 'asc',
+                    'ts_available'  => 'asc',
+                    'id'            => 'asc',
+                ), 1);
+
+                $job = $this->mysql->find('job', array(
+                    'session'       => $this->session,
+                    'ts_updated'    => $now,
+                ));
+
+                if ($job) {
+                    break;
+                }
+            }
+
+            $this->mysql->commit();
+        } catch (Exception $ex) {
+            $this->mysql->rollback();
+            throw $ex;
+        }
+
+        return $job;
     }
 
-    /**
-     * Consumer. Delete a job of mine or nobody from the queue.
-     *
-     * @param   long    id
-     *
-     * @return  boolean false when not found
-     */
     public function delete($id)
     {
+        $result = false;
+        $this->mysql->begin();
+
+        try {
+            $job = $this->mysql->findForUpdate('job', array(
+                'id'    => $id,
+            ));
+
+            if ($job && $job['state'] != self::STATE_DELETED) {
+                $result = true;
+
+                $now = time();
+
+                if (
+                    $job['state'] == self::STATE_READY
+                    && $job['ts_available'] > $now
+                    && $job['session']
+                    && $job['session'] != $this->session
+                ) {
+                    throw new Mmq_JobException('Cannot delete job reserved by some other session');
+                }
+
+                $this->mysql->update('job', array(
+                    'state'         => self::STATE_DELETED,
+                    'ts_updated'    => $now,
+                ), array(
+                    'id'            => $id,
+                ));
+            }
+
+        } catch (Exception $ex) {
+            $this->mysql->rollback();
+            throw $ex;
+        }
+
+        return $result;
     }
 
-    /**
-     * Consumer. Touch a job of mine.
-     *
-     * @param   long    id
-     *
-     * @return  boolean false when not found
-     */
     public function touch($id)
     {
+        $result = false;
+        $this->mysql->begin();
+
+        try {
+            $job = $this->mysql->findForUpdate('job', array(
+                'id'    => $id,
+            ));
+
+            if ($job && $job['state'] != self::STATE_DELETED) {
+                $result = true;
+
+                $now = time();
+
+                if (
+                    $job['state'] != self::STATE_READY
+                    || $job['ts_available'] <= $now
+                    || $job['session'] != $this->session
+                ) {
+                    throw new Mmq_JobException('Cannot touch job not reserved by this session');
+                }
+
+                $this->mysql->update('job', array(
+                    'ts_available$expr' => 'ttr + '.$now,
+                    'ts_updated'        => $now,
+                ), array(
+                    'id'                => $id,
+                ));
+            }
+
+        } catch (Exception $ex) {
+            $this->mysql->rollback();
+            throw $ex;
+        }
+
+        return $result;
     }
 
-    /**
-     * Consumer. Release a job of mine back into the queue.
-     *
-     * @param   long    id
-     * @param   long    delay
-     * @param   long    pri
-     *
-     * @return  boolean false when not found
-     */
-    public function release($id, $delay, $pri)
+    public function release($id, $pri = -1, $delay = 0)
     {
+        $result = false;
+        $this->mysql->begin();
+
+        try {
+            $job = $this->mysql->findForUpdate('job', array(
+                'id'    => $id,
+            ));
+
+            if ($job && $job['state'] != self::STATE_DELETED) {
+                $result = true;
+
+                $now = time();
+
+                if (
+                    $job['state'] != self::STATE_READY
+                    || $job['ts_available'] <= $now
+                    || $job['session'] != $this->session
+                ) {
+                    throw new Mmq_JobException('Cannot release job not reserved by this session');
+                }
+
+                $updates = array(
+                    'session'       => 0,
+                    'ts_available'  => $now + max(0, (int) $delay),
+                    'ts_updated'    => $now,
+                );
+
+                if ($pri >= 0) {
+                    $updates['pri'] = $this->filterPriority($pri);
+                }
+
+                $this->mysql->update('job', $updates, array(
+                    'id'    => $id,
+                ));
+            }
+
+        } catch (Exception $ex) {
+            $this->mysql->rollback();
+            throw $ex;
+        }
+
+        return $result;
     }
 
-    /**
-     * Consumer. Bury a job of mine or nobody.
-     *
-     * @param   long    id
-     * @param   long    pri
-     *
-     * @return  boolean false when not found
-     */
-    public function bury($id, $pri)
+    public function bury($id, $pri = -1)
     {
-    }
+        $result = false;
+        $this->mysql->begin();
 
-    /**
-     * Client. Move a buried job into the ready state.
-     *
-     * @param   long    id
-     *
-     * @return  boolean false when not found
-     */
-    public function kick($id)
-    {
-    }
+        try {
+            $job = $this->mysql->findForUpdate('job', array(
+                'id'    => $id,
+            ));
 
-    /**
-     * Client. Move buried jobs into the ready state on the currently used tube.
-     *
-     * @param   long    bound
-     *
-     * @return  long    jobs kicked
-     */
-    public function kickJobs($bound)
-    {
+            if ($job && $job['state'] != self::STATE_DELETED) {
+                $result = true;
+
+                $now = time();
+
+                if (
+                    $job['state'] == self::STATE_READY
+                    && $job['ts_available'] > $now
+                    && $job['session']
+                    && $job['session'] != $this->session
+                ) {
+                    throw new Mmq_JobException('Cannot bury job reserved by some other session');
+                }
+
+                $updates = array(
+                    'pri'           => $pri,
+                    'state'         => self::STATE_BURIED,
+                    'ts_updated'    => $now,
+                );
+
+                if ($pri >= 0) {
+                    $updates['pri'] = $this->filterPriority($pri);
+                }
+
+                $this->mysql->update('job', $updates, array(
+                    'id'            => $id,
+                ));
+            }
+
+        } catch (Exception $ex) {
+            $this->mysql->rollback();
+            throw $ex;
+        }
+
+        return $result;
     }
 
 }
