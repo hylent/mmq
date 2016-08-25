@@ -2,6 +2,7 @@
 CREATE TABLE `mmq_session` (
     `session`       BIGINT UNSIGNED NOT NULL                COMMENT '客户端',
     `tube`          VARCHAR(200) NOT NULL                   COMMENT '使用的管道',
+    `cnt_tries`     BIGINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '尝试次数',
     `ts_created`    INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '创建时间',
     `ts_updated`    INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '更新时间',
     primary key (`session`)
@@ -31,14 +32,15 @@ CREATE TABLE `mmq_job` (
     `tube`          VARCHAR(200) NOT NULL                   COMMENT '管道',
     `state`         TINYINT UNSIGNED NOT NULL DEFAULT 0     COMMENT '状态：0就绪，1搁置，2删除',
     `session`       BIGINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '客户端',
+    `cnt_tries`     BIGINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '尝试次数',
+    `cnt_reserves`  BIGINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '消费次数',
+    `cnt_timeouts`  BIGINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '超时次数',
+    `cnt_releases`  BIGINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '重放次数',
+    `cnt_buries`    BIGINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '搁置次数',
+    `cnt_kicks`     BIGINT UNSIGNED NOT NULL DEFAULT 0      COMMENT '激活次数',
     `ts_available`  INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '可用时间',
     `ts_created`    INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '创建时间',
     `ts_updated`    INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '更新时间',
-    `cnt_reserves`  INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '消费次数',
-    `cnt_timeouts`  INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '超时次数',
-    `cnt_releases`  INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '重放次数',
-    `cnt_buries`    INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '搁置次数',
-    `cnt_kicks`     INT UNSIGNED NOT NULL DEFAULT 0         COMMENT '激活次数',
     primary key (`id`)
 )
 COMMENT='任务消息'
